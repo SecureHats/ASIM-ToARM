@@ -1,15 +1,15 @@
-name: 'template'
-description: 'description of solution shown on the marketplace'
+name: 'ASim-ToArm'
+description: 'This GitHub Action converts the ASIM Parser in the Microsoft GitHub format to deployable ARM templates'
 branding:
   icon: 'check-square'
   color: 'green'
 inputs:
-  parameter1:
-    description:  'parameter 1 description'
+  filesPath:
+    description:  'path to the existing files'
     required: false
     default: ''
-  parameter1:
-    description:  'parameter 2 description'
+  outputFolder:
+    description:  'Output folder for the created artifacts'
     required: false
     default: ''
 
@@ -17,6 +17,6 @@ runs:
   using: "composite"
   steps:
     - run: ${{ github.action_path }}/action.ps1 `
-              -parameter1 '${{ inputs.parameter1 }}' `
-              -parameter2 '${{ inputs.parameter2 }}'
+              -filesPath '${{ inputs.filesPath }}' `
+              -outputFolder '${{ inputs.outputFolder }}'
       shell: pwsh

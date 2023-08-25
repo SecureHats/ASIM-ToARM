@@ -1,185 +1,134 @@
-Function Set-LogAnalyticsData {
+function Convert-AsimToArm {
+    [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [string]$workspaceId,
+        [string]$FilesPath,
 
-        [Parameter(Mandatory = $true)]
-        [securestring]$workspaceKey,
+        [Parameter(Mandatory = $false)]
+        [string]$OutputFolder,
 
-        [Parameter(Mandatory = $true)]
-        [array]$body,
-
-        [Parameter(Mandatory = $true)]
-        [string]$logType,
-
-        [Parameter(Mandatory = $true)]
-        [string]$timestamp
+        [Parameter(Mandatory = $false)]
+        [switch]$ReturnObject
     )
 
-    $properties = @{
-        "WorkspaceId"   = $workspaceId
-        "WorkspaceKey"  = $workspaceKey
-        "contentLength" = $body.Length
-        "timestamp"     = $timestamp
-    }
+    #Region Install Modules
+    $modulesToInstall = @(
+        'powershell-yaml'
+    )
 
-    $payload = @{
-        "Headers"     = @{
-            "Authorization" = Build-Signature @properties
-            "Log-Type"      = $logType
-            "x-ms-date"     = $timestamp
+    $modulesToInstall | ForEach-Object {
+        if (-not (Get-Module -ListAvailable -All $_)) {
+            Write-Output "Module [$_] not found, INSTALLING..."
+            Install-Module $_ -Force
+            Import-Module $_ -Force
         }
-        "method"      = "POST"
-        "contentType" = "application/json"
-        "uri"         = "https://{0}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01" -f $workspaceId
-        "body"        = $body
     }
+    #EndRegion Install Modules
 
-    $response = Invoke-WebRequest @payload -UseBasicParsing
-
-    if (-not($response.StatusCode -eq 200)) {
-        Write-Warning "Unable to send data to Data Log Collector table"
+    #Region Fetching Yaml Files
+    try {
+        $yamlFiles = Get-ChildItem -Path $FilesPath -Include "*.yaml", "*.yml" -Recurse
+        Write-Debug "Found $($yamlFiles.Count) yaml files"
+    }
+    catch {
+        Write-Error $_.Exception.Message
         break
     }
-    else {
-        Write-Output "Uploaded to Data Log Collector table [$($logType + '_CL')] at [$timestamp]"
-    }
-}
+    #EndRegion Fetching Yaml Files
 
-Function Build-Signature {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$workspaceId,
-
-        [Parameter(Mandatory = $true)]
-        [securestring]$workspaceKey,
-
-        [Parameter(Mandatory = $true)]
-        [int32]$contentLength,
-
-        [Parameter(Mandatory = $true)]
-        [string]$timestamp
-    )
-
-        $xHeaders       = "x-ms-date:" + $timestamp
-        $stringToHash   = "POST" + "`n" + $contentLength + "`n" + "application/json" + "`n" + $xHeaders + "`n" + "/api/logs"
-        $bytesToHash    = [Text.Encoding]::UTF8.GetBytes($stringToHash)
-        $keyBytes       = [Convert]::FromBase64String((ConvertFrom-SecureString -SecureString $workspaceKey -AsPlainText))
-        $sha256         = New-Object System.Security.Cryptography.HMACSHA256
-        $sha256.Key     = $keyBytes
-        $calculatedHash = $sha256.ComputeHash($bytesToHash)
-        $encodedHash    = [Convert]::ToBase64String($calculatedHash)
-        $authorization  = 'SharedKey {0}:{1}' -f $workspaceId, $encodedHash
-
-    return $authorization
-}
-
-Function Get-Workspace {
-    param (
-        [Parameter(Mandatory = $false)]
-        [string]$workspaceName
-    )
-
-    if (-not([string]::IsNullOrEmpty($workspaceName))) {
-        try {
-            $workspaceObject = @{
-                workspaceId  = ''
-                workspaceKey = ''
-            }
-
-            Write-Verbose "Connecting to workspace"
-            $workspace = Get-AzResource `
-                -Name "$workspaceName" `
-                -ResourceType 'Microsoft.OperationalInsights/workspaces'
-
-            $ResourceGroupName = $workspace.ResourceGroupName
-            $workspaceName = $workspace.Name
-
-            $workspaceObject.workspaceId = (Get-AzOperationalInsightsWorkspace -ResourceGroupName $resourceGroupName -Name $workspaceName).CustomerId.Guid
-
-            Write-Host "Workspace Name: $($workspaceName)"
-            Write-Host "Workspace Id: $(workspaceObject.$workspaceId)"
-
-            if ($null -ne $workspace) {
+    #Region Processing Yaml Files
+    try {
+        if ($null -ne $yamlFiles) {
+            foreach ($item in $yamlFiles) {
                 try {
-                    Set-Item Env:\SuppressAzurePowerShellBreakingChangeWarnings "true"
+                    $yamlObject = Get-Content $item.FullName | ConvertFrom-Yaml
+                    Write-Debug "Processing $($item)"
 
-                    $workspaceObject.workspaceKey = `
-                    (Get-AzOperationalInsightsWorkspaceSharedKeys `
-                            -ResourceGroupName $resourceGroupName `
-                            -Name $workspaceName).PrimarySharedKey `
-                    | ConvertTo-SecureString -AsPlainText -Force
+                    $parserParams = $yamlObject.ParserParams | ForEach-Object {
+                        ($string = "$($string), $($_.Name):$($_.Type)=$($_.Default)").Trim(',')
+                    }
+
+                    $body = [pscustomobject]@{
+                        "properties" = @{
+                            etag               = "*"
+                            displayName        = $yamlObject.Parser.Title
+                            category           = "ASIM"
+                            FunctionAlias      = $yamlObject.ParserName
+                            functionParameters = $parserParams.trim(' ,')
+                            query              = $yamlObject.ParserQuery
+                            version            = $yamlObject.Parser.Version
+                        }
+                    }
                 }
                 catch {
-                    Write-Warning -Message "Log Analytics workspace key for [$($workspaceName)] not found."
+                    Write-Error $_.Exception.Message
                     break
                 }
+
+                if ($OutputFolder) {
+                    $outputPath = $OutputFolder
+                }
+                else {
+                    $outputPath = $item.DirectoryName
+                }
+                ConvertTo-ARM -value $body -OutputPath ('{0}/{1}.json' -f ($($OutputPath), $($item.BaseName))) -returnObject $ReturnObject
             }
-            return $workspaceObject
-        }
-        catch {
-            Write-Warning -Message "Log Analytics workspace [$($workspaceName)] not found in the current context"
-            break
         }
     }
+    catch {
+        Write-Error $_.Exception.Message
+        break
+    }
 }
+#EndRegion Processing Yaml Files
 
-function Send-CustomLogs {
+#Region HelperFunctions
+function ConvertTo-ARM {
     param (
         [Parameter(Mandatory = $true)]
-        [String]$workspaceId,
+        [object]$value,
 
-        [Parameter(Mandatory = $true)]
-        [SecureString]$workspaceKey,
+        [Parameter(Mandatory = $false)]
+        [string]$OutputPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$tableName,
+        [Parameter(Mandatory = $false)]
+        [bool]$returnObject
 
-        [Parameter(Mandatory = $true)]
-        [array]$dataInput
     )
 
-    $postObject = @{
-        "workspaceId"  = $workspaceId
-        "WorkspaceKey" = $workspaceKey
-        "logType"      = $tableName
-        "body"         = ''
-        "timestamp"    = ''
-    }
-
-    $tempdata = @()
-    $tempDataSize = 0
-
-    if ((($dataInput | ConvertTo-Json -depth 20).Length) -gt 25MB) {
-        foreach ($record in $dataInput) {
-            $tempdata += $record
-            $tempDataSize += ($record | ConvertTo-Json -depth 20).Length
-            if ($tempDataSize -gt 25MB) {
-                $postObject.body = ([System.Text.Encoding]::UTF8.GetBytes(($tempdata | ConvertTo-Json)))
-                $postObject.timestamp = [DateTime]::UtcNow.ToString("r")
-
-                Write-Host "Sending block data = $TempDataSize"
-                Set-LogAnalyticsData @postObject
-
-                $tempdata = $null
-                $tempdata = @()
-                $tempDataSize = 0
+    Write-Host 'Creating ARM Template'
+    $template = [pscustomobject]@{
+        '$schema'      = "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#"
+        contentVersion = "1.0.0.0"
+        parameters     = @{
+            workspace     = @{
+                type = "string"
             }
         }
-        $postObject.body = ([System.Text.Encoding]::UTF8.GetBytes(($tempdata | ConvertTo-Json -depth 20)))
-        $postObject.timestamp = [DateTime]::UtcNow.ToString("r")
-
-        Write-Host "Sending left over data = $Tempdatasize"
-        Set-LogAnalyticsData @postObject
-
-        $tempdata = $null
-        $tempdata = @()
-        $tempDataSize = 0
-    } else {
-        $postObject.body = ([System.Text.Encoding]::UTF8.GetBytes(($dataInput | ConvertTo-Json -depth 20)))
-        $postObject.timestamp = [DateTime]::UtcNow.ToString("r")
+        resources      = @(
+            [pscustomobject]@{
+                name       = "[parameters('Workspace')]"
+                type       = "Microsoft.OperationalInsights/workspaces"
+                apiVersion = "2017-03-15-preview"
+                location   = "[resourcegroup().location]"
+                resources  = @([PSCustomObject]@{
+                        type       = "savedSearches"
+                        apiVersion = "2020-08-01"
+                        name       = $($value.properties.FunctionAlias)
+                        properties = $value.properties
+                        dependsOn  = @("[resourceId('Microsoft.OperationalInsights/workspaces', parameters('Workspace'))]")
+                    }
+                )
+            }
+        )
     }
 
-    Write-Host "Sending data to [$($tableName + '_CL')]"
-    Set-LogAnalyticsData @postObject
+    if ($returnObject) {
+        return $template
+    }
+    else {
+        $template | ConvertTo-Json -Depth 20 | Out-File $OutputPath -ErrorAction Stop
+    }
 }
+
+#EndRegion HelperFunctions
